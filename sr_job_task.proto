@@ -1,0 +1,91 @@
+/*
+	SR 礼券相关API协议
+	RPC:		sr.job.task.rpc
+	Exchange:	sr.job.task.notify
+*/
+package sr.job.task;
+//-------------------------全部消息
+message Header{
+	required string sender=1;
+	required string sender_type=2;
+	optional uint32 invoke_id=3;
+}
+
+message Message{
+	// 头部
+	required Header header=1;
+	// 主体
+	oneof content
+	{
+		RunTaskRequest req_task_run=2;
+		RunTaskResponse res_task_run=3;
+		ChangeTaskRequest req_task_change=4;
+		ChangeTaskResponse res_task_change=5;
+		SessionCloseRequest req_session_close=6;
+		TagNameUpdateRequest req_tag_update=7;
+		TagNameUpdateResponse res_tag_update=8;
+	}
+}
+
+
+// 请求:运行任务(SC->PY)
+message RunTaskRequest
+{
+    //taskid
+    required int32 id=1;
+}
+
+// 回应:运行任务 (PY->SC)
+message RunTaskResponse
+{
+	// 错误码
+	required int32 errcode=1;
+	// 错误消息
+	optional string errmsg=2;
+}
+
+//请求：启用禁用任务(SC->PY)
+message ChangeTaskRequest
+{
+    //taskid
+    required int32 id=1;
+    //状态码
+    required int32 statuscode=2;
+}
+
+//回应：启用禁用任务(SC->PY)
+message ChangeTaskResponse
+{
+	// 错误码
+	required int32 errcode=1;
+	// 错误消息
+	optional string errmsg=2;
+}
+
+//请求：关闭回话(PY->SC)
+message SessionCloseRequest
+{
+	required string openid=1;
+	required int32 type=2;
+	required string accountid=3;
+
+}
+// 请求:修改标签名称(SC->PY)
+message TagNameUpdateRequest
+{
+    //jobid
+    required int32 id=1;
+    //tagName
+    required string tagname=2;
+}
+
+// 回应:修改标签名称 (PY->SC)
+message TagNameUpdateResponse
+{
+	// 错误码
+	required int32 errcode=1;
+	// 错误消息
+	optional string errmsg=2;
+}
+
+

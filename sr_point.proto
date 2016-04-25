@@ -1,0 +1,56 @@
+/*
+	SR 积分接口协议
+	RPC:		sr.point.rpc
+	Exchange:	sr.point.notify
+*/
+package sr.point;
+
+//-------------------------全部消息
+message Header{
+	required string sender=1;
+	required string sender_type=2;
+	optional uint32 invoke_id=3;
+}
+
+message Message
+{
+	// 头部
+	required Header header=1;
+	// 主体
+	oneof content
+	{
+	//请求：新增积分收入信息
+	ReceiptPointRequest req_receipt_point=10;
+	//回应：新增积分收入信息
+	ReceiptPointResponse res_receipt_point=11;
+	}
+}
+//-------------------------内容定义
+
+//
+message ReceiptPointRequest
+{
+	 required int32 addednum=2;
+	 required int32 custid=3;
+	 optional int32 availablenum=4;
+	 optional string gettime=5;
+	 optional string duetime=6;
+	 optional int32 channelcode=7;
+	 optional int32 sourceid=8;
+	 optional int32 statuscode=9;
+	 required int32 typeid=10;
+	 optional string remark=11;
+	 optional int32 tradeid=12;
+	 optional double tradeamount=13;
+}
+
+
+message ReceiptPointResponse
+{
+    // 错误码
+    required int32 errcode=1;
+    // 错误消息
+    optional string errmsg=2;
+    required int32 id=3;
+}
+

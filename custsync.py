@@ -2,7 +2,7 @@
 # coding:utf-8
 from celery import Celery,platforms
 from kombu import Exchange, Queue
-import pymongo
+from config import *
 import mysql.connector
 import json
 import uuid
@@ -13,56 +13,9 @@ import uuid
 import cf_wechat_pb2
 import threading
 
-amqp_url = "amqp://guest:guest@172.16.0.64/"
-mongo_url = "mongodb://172.16.0.64/srjob"
-mysql_conf = {
-    'host': '172.16.0.176',
-    'port': 3306,
-    'database': 'smartrewardsdev_30',
-    'user': 'srdev',
-    'password': 'sr_dev1124'
-}
-
-mongo = None
-def ensure_mongo():
-    global mongo
-    if mongo:
-        return mongo
-
-    mongo = pymongo.MongoClient(mongo_url);
-    mongo = mongo[mongo_url.split("/")[-1]]
-    return mongo
-
-
-mydb = None
-def ensure_mysql():
-    global mydb
-    if mydb:
-        return mydb
-
-    mydb = mysql.connector.connect(**mysql_conf);
-    return mydb
-
-url = "amqp://guest:guest@172.16.0.64:5672/"
-exchange = "amq.direct"
-routing_key = "cf.wechat.rpc"
-
-rpc = None
-def ensure_rpc():
-    global rpc
-    if rpc:
-        return rpc
-
-    rpc = MyRpc(url, exchange, routing_key)
-    t = threading.Thread(target=rpc.serve)
-    t.setDaemon(True)
-    t.start()
-    return rpc
-
-
 app = Celery("srjob.custinfo", broker=amqp_url)
 
-
+ONCENUM = 100
 platforms.C_FORCE_ROOT = True
 
 app.conf.update(
@@ -70,7 +23,7 @@ app.conf.update(
     CELERY_TASK_SERIALIZER='json',
     CELERY_ACCEPT_CONTENT=['json'],  # Ignore other content
     CELERY_RESULT_SERIALIZER='json',
-    CELERY_IMPORTS = ("findJob","tagsync","usercheck","addJob","addtask","tasks",)
+    CELERY_IMPORTS = ("addsendapp","preparesendapp","dosendapp","addJob","addreward","addsendmail","addsendmsg","addsendsms","addtask","custinfosync","doreward","dosendmail","dosendmsg","dosendsms","findJob","preparereward","preparesendmail","preparesendmsg","preparesendsms","sessionclose","tagsync","tasks","usercheck",)
 )
 
 
@@ -80,103 +33,192 @@ def custsync():
     #创建守护线程，处理amqp事件
     #程序会等待所有非守护线程结束，才会退出
     #守护线程在程序退出时，自动结束
-    ensure_rpc()
+    print("custsynccustsynccustsynccustsynccustsync")
+    mydb = connect()
+    ensure_mysql()
+    rpc = ensure_rpc()
+    redisdb = ensure_redis()
+    cursor = mydb.cursor()
+    logid = 0
+    logsql = ("insert into sr_sys_schedule_log (taskid,taskname,exectime,statecode) VALUES (%d,\"%s\",NOW(),1)" % (26,"同步微信会员"))
+    cursor.execute(logsql)
+    logid = cursor.lastrowid
+    mydb.commit()
+    sql = "SELECT innerid,org_id FROM cf_account where method_code = 1 and enabled = 1"
+    cursor = mydb.cursor()
+    cursor.execute(sql)
+    for row in cursor.fetchall(): 
+        if not row:
+            break
+        account_id = row[0]
+        org_id = row[1]
 
-    req = cf_wechat_pb2.Message()
-    req.header.sender="sendre1"
-    req.header.sender_type="type1"
-    req.req_userinfo_query.account_id = "testid"
-    condition = req.req_userinfo_query.customer_search_condition.add()
-    condition.wechat_open_id="123"
-    data = req.SerializeToString()
+        req = cf_wechat_pb2.Message()
+        req.header.sender="req_userinfo_sync"
+        req.header.sender_type="type1"
+        req.req_userinfo_sync.account_id = account_id
+        print(req)
+        data = req.SerializeToString()
 
-    #第二个参数类型float，单位秒，缺省为None，不超时
-    data = rpc.call(data)    #1 seconds timeout
-    if data:
-        reply = cf_wechat_pb2.Message()
-        reply.ParseFromString(data)
-        print(reply)
-        print(reply.res_userinfo_query.errcode)
-    else:   #如果超时，返回None
-        print("timeout")
+        #第二个参数类型float，单位秒，缺省为None，不超时
+        data = rpc.call(data,10)    #1 seconds timeout
+        if data:
+            reply = cf_wechat_pb2.Message()
+            reply.ParseFromString(data)
+            next_openid = reply.res_userinfo_sync.next_openid
+            openidlist = reply.res_userinfo_sync.openid_list
+            count = 0
+            while True:
+                print("openidlist=="+str(len(openidlist)))
+                if count == 0:
+                    count = count + 1
+                    if len(openidlist) > 0:
+                        temp = []
+                        openids = ""
+                        tempcount = 0
+                        for i in range(len(openidlist)):
+                            temp.append(openidlist[i])
+                            openids=openids+openidlist[i].encode('utf-8')+","
+                            if len(temp) == ONCENUM:
+                                tempcount = tempcount + 1
+                                openidlistid = str(uuid.uuid4())
+                                redisdb.hmset("openidsync:"+openidlistid,{
+                                    "_id": openidlistid,
+                                    "openidlist": openids,
+                                    "logid": logid,
+                                    "lastid": 0,
+                                    "account_id":account_id,
+                                    "org_id":org_id
+                                })
 
-
-class MyRpc:
-    def __init__(self, url, exchange, routing_key=""):
-        self.url = url
-        self.exchange = exchange
-        self.routing_key = routing_key
-
-        self.conn = pika.BlockingConnection(pika.URLParameters(self.url))
-        self.channel = self.conn.channel()
-
-        self.queue = self.routing_key + "#" + str(uuid.uuid4())
-        self.channel.queue_declare(self.queue, exclusive=True)
-
-        #这里是多线程同步的关键
-        #锁和条件变量，用于创建消费者-生产模式
-        #受锁保护的字典，用来保存rpc的回应
-        self.lock = threading.RLock()
-        self.cond = threading.Condition(self.lock)
-        self.replies = {}
-
-    def consume_cb(self, ch, method, props, body):
-        self.cond.acquire()
-        try:
-            if props.correlation_id in self.replies:
-                self.replies[props.correlation_id] = body
-
-                self.cond.notifyAll()
-        finally:
-            self.cond.release()
-
-    #阻塞操作，需要创建线程来执行该方法
-    def serve(self):
-        self.channel.basic_consume(self.consume_cb, self.queue)
-        self.channel.start_consuming()
-
-    #线程安全
-    def call(self, data, timeout=None):
-
-        uid = str(uuid.uuid4())
-        reply = None
-
-        self.lock.acquire()
-        try:
-            #先将key添加到replies，以便回调函数操作
-            self.replies[uid] = None
-        finally:
-            self.lock.release()
-
-        self.channel.basic_publish(self.exchange,
-                                   self.routing_key,
-                                   properties=pika.BasicProperties(reply_to=self.queue, correlation_id=uid),
-                                   body=data)
-
-        while not reply:
-            if timeout:
-                starttime = time.time()
-
-            self.cond.acquire()
-            self.cond.wait(timeout)
-
-            try:
-                reply = self.replies[uid]
-                if reply:
-                    del self.replies[uid]   #从字典中删除该key
-                elif timeout:
-                    #如果这次没获取到，timeout减去这次消耗的事件
-                    timeout -= (time.time() - starttime)
-
-                    #timeout，跳出，返回
-                    if timeout <= 0:
-                        del self.replies[uid]   #从字典中删除该key
+                                redisdb.lpush("openid","openidsync:"+openidlistid)
+                                #app.send_task('srjob.custinfo.custinfosync',args=[temp],queue='custinfosync')
+                                temp = []
+                                openids = ""
+                        if len(temp)>0:
+                            openidlistid = str(uuid.uuid4())
+                            redisdb.lpush("openid","openidsync:"+openidlistid)
+                            redisdb.hmset("openidsync:"+openidlistid,{
+                                "_id": openidlistid,
+                                "openidlist": openids,
+                                "logid": logid,
+                                "lastid": 1,
+                                "account_id":account_id,
+                                "org_id":org_id
+                            })
+                            #app.send_task('srjob.custinfo.custinfosync',args=[temp],queue='custinfosync')
+                    if len(openidlist) < 10000:
                         break
-            finally:
-                self.cond.release()
+                else:
+                    if len(openidlist) == 10000:
+                        req = cf_wechat_pb2.Message()
+                        req.header.sender="req_userinfo_sync"
+                        req.header.sender_type="type1"
+                        req.req_userinfo_sync.account_id = account_id
+                        condition = req.req_userinfo_sync.customer_search_condition
+                        condition.wechat_open_id=next_openid
+                        data = req.SerializeToString()
+                        data = rpc.call(data,60)    #1 seconds timeout
+                        if data:
+                            reply = cf_wechat_pb2.Message()
+                            reply.ParseFromString(data)
+                            next_openid = reply.res_userinfo_sync.next_openid
+                            openidlist = reply.res_userinfo_sync.openid_list
+                            if len(openidlist) != 0:
+                                temps = []
+                                openids = ""
+                                #tempcount = 0
+                                for i in range(len(openidlist)):
+                                    temps.append(openidlist[i])
+                                    openids=openids+openidlist[i].encode('utf-8')+","
+                                    if len(temps) == ONCENUM:
+                                        openidlistid = str(uuid.uuid4())
+                                        print("len(temps)=="+str(len(temps)))
+                                        redisdb.hmset("openidsync:"+openidlistid,{
+                                            "_id": openidlistid,
+                                            "openidlist": openids,
+                                            "logid": logid,
+                                            "lastid": 0,
+                                            "account_id":account_id,
+                                            "org_id":org_id
+                                        })
+                                        redisdb.lpush("openid","openidsync:"+openidlistid)
+                                        temps=[]
+                                        openids = ""
+                            else:
+                                redisdb.hmset("openidsync:"+openidlistid,{
+                                    "_id": openidlistid,
+                                    "openidlist": openids,
+                                    "logid": logid,
+                                    "lastid": 1,
+                                    "account_id":account_id,
+                                    "org_id":org_id
+                                })
+                                redisdb.lpush("openid","openidsync:"+openidlistid)
 
-        return reply
+                        else:   #如果超时，返回None
+                            if logid:
+                                updatelogsql = ("update sr_sys_schedule_log set statecode = 3 where id = %d" % logid)
+                                cursor = mydb.cursor()
+                                cursor.execute(updatelogsql)
+                                mydb.commit()
+                            print("timeout")
+                    else:
+                        if len(openidlist) != 0:
+                            temp2 = []
+                            openids = ""
+                            tempcount = 0
+                            for i in range(len(openidlist)):
+                                temp2.append(openidlist[i])
+                                openids=openids+openidlist[i].encode('utf-8')+","
+                                if len(temp2) == ONCENUM:
+                                    print("len(temp2)=="+str(len(temp2)))
+                                    tempcount = tempcount + 1
+                                    openidlistid = str(uuid.uuid4())
+                                    redisdb.hmset("openidsync:"+openidlistid,{
+                                        "_id": openidlistid,
+                                        "openidlist": openids,
+                                        "logid": logid,
+                                        "lastid": 0,
+                                        "account_id":account_id,
+                                        "org_id":org_id
+                                    })
+                                    redisdb.lpush("openid","openidsync:"+openidlistid)
+                                    temp2 = []
+                                    openids = ""
+                            if len(temp2)>0:
+                                openidlistid = str(uuid.uuid4())
+                                redisdb.lpush("openid","openidsync:"+openidlistid)
+                                redisdb.hmset("openidsync:"+openidlistid,{
+                                    "_id": openidlistid,
+                                    "openidlist": openids,
+                                    "logid": logid,
+                                    "lastid": 1,
+                                    "account_id":account_id,
+                                    "org_id":org_id
+                                })
+                                    #app.send_task('srjob.custinfo.custinfosync',args=[temp],queue='custinfosync')         
 
+                        else:   #如果超时，返回None
+                            redisdb.lpush("openid","openidsync:"+openidlistid)
+                            redisdb.hmset("openidsync:"+openidlistid,{
+                                "_id": openidlistid,
+                                "openidlist": "",
+                                "logid": logid,
+                                "lastid": 1,
+                                "account_id":account_id,
+                                "org_id":org_id
+                            })
+                        break
+                #time.sleep(3)
+
+        else:
+            if logid:
+                updatelogsql = ("update sr_sys_schedule_log set statecode = 3 where id = %d" % logid)
+                cursor = mydb.cursor()
+                cursor.execute(updatelogsql)
+                mydb.commit()
+            print("timeout")
 
 #while not finish:
     #conn.process_data_events()
@@ -184,4 +226,4 @@ if __name__ == "__main__":
     # 使用自定义参数运行
     # --beat同时开启beat模式，即运行按计划发送task的实例
     # 应确保全局只有一份同样的beat
-    app.worker_main(["worker", "--loglevel=debug","--concurrency=10","-n","custsync.%h","-Qcustsync"])
+    app.worker_main(["worker", "--loglevel=debug","-n","custsync.%h","-Qcustsync"])

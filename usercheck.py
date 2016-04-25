@@ -3,48 +3,16 @@
 
 from celery import Celery,platforms
 from kombu import Exchange, Queue
-import pymongo
+from config import *
 import mysql.connector
 import json
 import uuid
 import datetime
 import time
 
-ONCE_CAPACITY = 5000
-
-amqp_url = "amqp://guest:guest@172.16.0.64/"
-mongo_url = "mongodb://172.16.0.64/srjob"
-mysql_conf = {
-    'host': '172.16.0.176',
-    'port': 3306,
-    'database': 'smartrewardsdev_30',
-    'user': 'srdev',
-    'password': 'sr_dev1124'
-}
-
-mongo = None
-def ensure_mongo():
-    global mongo
-    if mongo:
-        return mongo
-
-    mongo = pymongo.MongoClient(mongo_url);
-    mongo = mongo[mongo_url.split("/")[-1]]
-    return mongo
-
-
-mydb = None
-def ensure_mysql():
-    global mydb
-    if mydb:
-        return mydb
-
-    mydb = mysql.connector.connect(**mysql_conf);
-    return mydb
-
+ONCE_CAPACITY = 200
 
 app = Celery("srjob.usertag", broker=amqp_url)
-
 
 platforms.C_FORCE_ROOT = True
 
@@ -53,7 +21,7 @@ app.conf.update(
     CELERY_TASK_SERIALIZER='json',
     CELERY_ACCEPT_CONTENT=['json'],  # Ignore other content
     CELERY_RESULT_SERIALIZER='json',
-    CELERY_IMPORTS = ("findJob","tasks","addtask","addJob",)
+    CELERY_IMPORTS = ("addsendapp","preparesendapp","dosendapp","addJob","addreward","addsendmail","addsendmsg","addsendsms","addtask","custinfosync","custsync","doreward","dosendmail","dosendmsg","dosendsms","findJob","preparereward","preparesendmail","preparesendmsg","preparesendsms","sessionclose","tagsync","tasks",)
 )
 
 diff_time = time.timezone
@@ -63,80 +31,112 @@ def utc_now():
 
 
 @app.task(queue="usercheck")
-def usercheck(parent_id, userid, tagid):
-    ensure_mongo()
+def usercheck(parent_id, userid, tagid,logid):
+    print("usercheckusercheckusercheckusercheck")
+    redisdb = ensure_redis()
+    mydb = connect()
     ensure_mysql()
-
 
     try:
         cursor = mydb.cursor()
         
-        upcount = 0     #总任务倒计数
+        dropcount = 0     #已打过数量
         sqlcount = 0    #sql数量
-        empty = False   #临时集合已空
-        bulk = mongo["dbsync"].initialize_unordered_bulk_op()        
-        
-        #usertag的退出策略有两种
-        #第一种是直到集合内数据全处理完，这很可能会阻塞整个任务队列
-        #第二种是每个suertag任务处理掉一定量的数据，就退出。鉴于usertag是个费时的操作，这对整个任务队列的通畅意义也不大
-        #如果采用第二种，须注意：一、创建合适数量的usertag任务，不要留下尾巴数据；二、注意删除临时集合的时机
-        #while True:
-        for x in range(ONCE_CAPACITY):
-            doc = mongo["task_"+str(parent_id)].find_one_and_delete({})
-            if not doc:
-                empty = True
-                break
-            
-            userid = doc["userid"]
+        tagcount = 0
+
+        task = redisdb.hgetall("task:"+str(parent_id))
+        querycount = task["queried"]
+        listlen = redisdb.llen("task_"+str(parent_id))
+        vallist = []
+        custids = []
+        for i in range(0, listlen):
+            userid = redisdb.lindex("task_"+str(parent_id),i)
             if str(userid).isdigit():
                 userid = int(str(userid).encode('utf-8'))
 
             # 查询user是否已经有该tag
             sql = "SELECT * FROM sr_tag_cust WHERE tagid = %d AND custid = %d" % (tagid,userid)
             cursor.execute(sql)
+            sqlcount += 1
             if len(cursor.fetchall()) == 0:
+                tagcount += 1
                 # 创建sql，保存到mongo，等dbsync执行
-                sql = "INSERT INTO sr_tag_cust VALUES(NULL,%d, %d, %d)" % (userid, tagid,parent_id)
-                bulk.insert({
-                    "task": {
-                        "_id": parent_id,
-                        "name": "srjob.usertag.add"
-                    },
-                    "sql": sql,
-					"tagid":tagid
-                })
-                
-                sqlcount += 1
-                if sqlcount % ONCE_CAPACITY == 0:
-                    bulk.execute()
-                    bulk = mongo["dbsync"].initialize_unordered_bulk_op()
+                custids.append(str(userid))
+                vallist.append("("+str(tagid)+","+str(userid)+","+str(parent_id)+")")
+                if sqlcount % ONCE_CAPACITY == 0: 
+                    val= ','.join(vallist)
+                    custidstring=','.join(custids)
+                    sql = "INSERT INTO sr_tag_cust VALUES"+val
+                    print(sql)
+                    tempid = str(uuid.uuid4())
+                    if logid:
+                        redisdb.hmset("dbsync:"+tempid,{
+                            "_id": parent_id,
+                            "logid": logid,
+                            "custids": custidstring,
+                            "sql": sql,
+                            "count": sqlcount,
+                            "tagcount":tagcount,
+					        "tagid":tagid
+                        })
+                    else:
+                        redisdb.hmset("dbsync:"+tempid,{
+                            "_id": parent_id,
+                            "sql": sql,
+                            "custids": custidstring,
+                            "count": sqlcount,
+                            "tagcount":tagcount,
+					        "tagid":tagid
+                        })
+                    redisdb.lpush("dbsync","dbsync:"+tempid)
+                    vallist = []
+                    custids = []
+                    sqlcount = 0
+                    tagcount = 0
+                #sqlcount += 1
             else:
-                #减少倒计数
-                upcount += 1
+                dropcount += 1
 
+        #if int(querycount) == dropcount:
+            #cursor = mydb.cursor()
+            #updatelogsql = ("update sr_sys_schedule_log set statecode = 2 where id = %d" % int(logid))
+            #cursor.execute(updatelogsql)
+            #mydb.commit()
+            #redisdb.hmset("task:"+str(parent_id),{"status":"SUCCESS", "end_time":utc_now()})
+        #else:
         #最后一批sql
         if sqlcount % ONCE_CAPACITY:
-            bulk.execute()
+            val= ','.join(vallist)
+            custidstring=','.join(custids)
+            sql = "INSERT INTO sr_tag_cust VALUES"+val
+            print(sql)
+            tempid = str(uuid.uuid4())
+            if logid:
+                redisdb.hmset("dbsync:"+tempid,{
+                    "_id": parent_id,
+                    "logid": logid,
+                    "sql": sql,
+                    "custids": custidstring,
+                    "count": sqlcount,
+                    "tagcount":tagcount,
+                    "tagid":tagid
+                })
+            else:
+                redisdb.hmset("dbsync:"+tempid,{
+                    "_id": parent_id,
+                    "sql": sql,
+                    "custids": custidstring,
+                    "count": sqlcount,
+                    "tagcount":tagcount,
+                    "tagid":tagid
+                })
+            redisdb.lpush("dbsync","dbsync:"+tempid)
+        redisdb.delete("task_"+str(parent_id))
+        redisdb.hset("task:"+str(parent_id),'prepare',1)
 
-        #删除临时集合
-        #find_one_and_delete返回None，表明集合已为空
-        #测试表明，删除不存在的集合无异常
-        if empty:
-            mongo["task_"+str(parent_id)].drop()
-
-        #增加upcount
-        if upcount:
-            doc = mongo["task"].find_one_and_update({"_id": parent_id, "status": "STARTED", "downcount": {"$exists": True}},
-                                                    {"$inc": {"downcount": (0 - upcount)}},
-                                                    {"_id": 0, "downcount": 1},
-                                                    return_document=pymongo.ReturnDocument.AFTER)
-            if doc and doc["downcount"] == 0:
-                mongo["task"].update_one({"_id": parent_id, "status": "STARTED"},
-                                         {"$set": {"status": "SUCCESS", "end_time": utc_now()}})
 
     except Exception as e:
-        mongo["task"].update_one({"_id": parent_id},
-                                 {"$set": {"status": "FAILURE", "error": str(e), "end_time": utc_now()}})
+        redisdb.hmset("task:"+str(parent_id),{"status":"FAILURE", "end_time":utc_now(), "error": str(e)})
         raise
 
 
@@ -147,4 +147,4 @@ if __name__ == "__main__":
     # 使用自定义参数运行
     # --beat同时开启beat模式，即运行按计划发送task的实例
     # 应确保全局只有一份同样的beat
-    app.worker_main(["worker", "--beat", "--loglevel=debug","-Qusercheck","--concurrency=10","-n","usercheck.%h"])
+    app.worker_main(["worker", "--loglevel=debug","-Qusercheck","-n","usercheck.%h"])

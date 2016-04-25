@@ -1,0 +1,31 @@
+/*
+	SR 奖赏引擎
+	Exchange:	sr.rewards.notify
+*/
+package sr.reward;
+//-------------------------全部消息
+message Header{
+	required string sender=1;
+	required string sender_type=2;
+	optional uint32 invoke_id=3;
+}
+
+message Message{
+	// 头部
+	required Header header=1;
+	// 主体
+	oneof content
+	{
+		TagInfo req_tag=6;
+	}
+}
+
+
+// 请求:运行任务(SC->PY)
+message TagInfo
+{
+	required string custid=1;
+	required string tagtime=2;
+}
+
+

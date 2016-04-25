@@ -1,47 +1,22 @@
 #!/usr/bin/python2.7
 # -*- coding: utf-8 -*-
 
+from config import *
 from celery import Celery,platforms
 from kombu import Exchange, Queue
-import pymongo
 import mysql.connector
 import json
 import uuid
 import datetime
 import time
+import sys
+
+reload(sys)
+
+sys.setdefaultencoding('utf8')
+
 
 ONCE_CAPACITY = 5000
-
-amqp_url = "amqp://guest:guest@172.16.0.64/"
-mongo_url = "mongodb://172.16.0.64/srjob"
-mysql_conf = {
-    'host': '172.16.0.176',
-    'port': 3306,
-    'database': 'smartrewardsdev_30',
-    'user': 'srdev',
-    'password': 'sr_dev1124'
-}
-
-mongo = None
-def ensure_mongo():
-    global mongo
-    if mongo:
-        return mongo
-
-    mongo = pymongo.MongoClient(mongo_url);
-    mongo = mongo[mongo_url.split("/")[-1]]
-    return mongo
-
-
-mydb = None
-def ensure_mysql():
-    global mydb
-    if mydb:
-        return mydb
-
-    mydb = mysql.connector.connect(**mysql_conf);
-    return mydb
-
 
 app = Celery("srjob.job", broker=amqp_url)
 
@@ -53,7 +28,7 @@ app.conf.update(
     CELERY_TASK_SERIALIZER='json',
     CELERY_ACCEPT_CONTENT=['json'],  # Ignore other content
     CELERY_RESULT_SERIALIZER='json',
-    CELERY_IMPORTS = ("findJob","tagsync","usercheck","tasks","addtask",)
+    CELERY_IMPORTS = ("addreward","addsendmail","addsendmsg","addsendsms","addtask","custinfosync","custsync","doreward","dosendmail","dosendmsg","dosendsms","findJob","preparereward","preparesendmail","preparesendmsg","preparesendsms","sessionclose","tagsync","tasks","usercheck","addsendapp","preparesendapp","dosendapp",)
 )
 
 diff_time = time.timezone
@@ -65,24 +40,42 @@ def utc_now():
 #添加定时任务
 @app.task(name="srjob.job.add")
 def addJob(task):
-    ensure_mongo()
+    redisdb = ensure_redis()
+    mydb = connect()
     ensure_mysql()
 
     task = json.loads(task)
-    print(task)
-    tagid = int(task["tagid"])
 
-    isenable = task["isenabled"]
-    periodcode = task["periodcode"]
-    minte = task["minute"]
-    hous = task["hour"]
-    timess = task["time"]
-    months = task["month"]
-    week = task["week"]
-    taskname = task["taskname"]
-    filtercondition = _decode_dict(task["customer"])
-    tasktypecode = task["tasktypecode"]
-    createrid = task["createdid"]
+    tagid = int(task["tagid"])
+    task_id = 0
+    if "taskid" in task.keys():
+        task_id = task["taskid"]
+    if "isenabled" in task.keys():
+        isenable = task["isenabled"]
+    if "periodcode" in task.keys():
+        periodcode = task["periodcode"]
+    if "minte" in task.keys():
+        minte = task["minute"]
+    if "hour" in task.keys():
+        hous = task["hour"]
+    if "time" in task.keys():
+        timess = task["time"]
+    if "month" in task.keys():
+        months = task["month"]
+    if "week" in task.keys():
+        week = task["week"]
+    if "taskname" in task.keys():
+        taskname = task["taskname"]
+    customer = task["customer"]
+
+    filtercondition = json.dumps(customer,ensure_ascii=False)
+    print(filtercondition)
+    if "tasktypecode" in task.keys():
+        tasktypecode = task["tasktypecode"]
+    if "createrid" in task.keys():
+        createrid = task["createrid"]
+    if "modifierid" in task.keys():
+        modifierid = task["modifierid"]
 
     #当按分钟运行
     if periodcode == 1:
@@ -160,24 +153,33 @@ def addJob(task):
     task['nexttime'] = nexttime
     task['starttime'] = starttime
     print(datetime.datetime.strptime(nexttime, '%Y-%m-%d %H:%M:%S'))    
-
-    sql = ("INSERT INTO sr_sys_schedule_task(id,taskname,tasksource,filtercondition,tasktypecode,periodcode,starttime,nexttime,runninglevel,isenabled,createrid,createdtime,modifierid,modifiedtime) values (null,\"%s\",%d,\"%s\",%d,%d,\"%s\",\"%s\",2,1,\"%s\",NOW(),null,null)" % (taskname,tagid,filtercondition,tasktypecode,periodcode,starttime,nexttime,createrid))
-    #保存到mysql
     cursor = mydb.cursor()
-    cursor.execute(sql)
-    task_id = cursor.lastrowid
-    mydb.commit()
-    print("task_id="+str(task_id))
-    # 保存job
-    mongo["job"].insert({
-        "_id": task_id,
-        "task": "srjob.job.add",
-        "arguments": task,
-        "isenable":isenable,
-        "nexttime":nexttime,
-        "begin_time": utc_now(),
-        "status": "WAITTED"
-    })
+    filtercondition = str(filtercondition).replace("'",'"')
+    if task_id != 0:
+        updatesql = ("UPDATE sr_sys_schedule_task set taskname=\"%s\",filtercondition=\'%s\',tasktypecode=%d,periodcode=%d,starttime=\"%s\",nexttime=\"%s\",modifierid=\"%s\",modifiedtime=NOW() where id = %d" % (taskname,filtercondition,tasktypecode,periodcode,starttime,nexttime,modifierid,task_id))
+        print(updatesql)
+        cursor.execute(updatesql)
+        mydb.commit()
+        redisdb.hmset("job:"+str(task_id),{"arguments": _decode_dict(task), "isenable": isenable,"nexttime":nexttime})
+    else:
+        sql = ("INSERT INTO sr_sys_schedule_task(id,taskname,tasksource,filtercondition,tasktypecode,periodcode,starttime,nexttime,runninglevel,isenabled,createrid,createdtime,modifierid,modifiedtime) values (null,\"%s\",%d,\'%s\',%d,%d,\"%s\",\"%s\",2,1,\"%s\",NOW(),null,null)" % (taskname,tagid,filtercondition,tasktypecode,periodcode,starttime,nexttime,createrid))
+        print(sql)
+        #保存到mysql
+        cursor.execute(sql)
+        task_id = cursor.lastrowid
+        mydb.commit()
+        print("task_id="+str(task_id))
+        redisdb.hmset("job:"+str(task_id),{
+            "_id": task_id,
+            "task": "srjob.job.add",
+            "taskname": taskname,
+            "arguments": _decode_dict(task),
+            "isenable":isenable,
+            "nexttime":nexttime,
+            "begin_time": datetime.datetime.strftime(datetime.datetime.now(), '%Y-%m-%d %H:%M:%S'),
+            "status": "WAITTED"
+        })
+        redisdb.lpush("job","job:"+str(task_id))
 
 def _decode_dict(data):
     rv = {}
@@ -193,6 +195,18 @@ def _decode_dict(data):
         rv[key] = value
     return rv
 
+def _decode_list(data):
+     rv = []
+     for item in data:
+         if isinstance(item, unicode):
+             item = item.encode('utf-8')
+         elif isinstance(item, list):
+             item = _decode_list(item)
+         elif isinstance(item, dict):
+             item = _decode_dict(item)
+         rv.append(item)
+     return rv
+
 
 if __name__ == "__main__":
     # 使用sys.argv参数运行
@@ -201,4 +215,4 @@ if __name__ == "__main__":
     # 使用自定义参数运行
     # --beat同时开启beat模式，即运行按计划发送task的实例
     # 应确保全局只有一份同样的beat
-    app.worker_main(["worker", "--loglevel=debug","--concurrency=10","-n","addJob.%h"])
+    app.worker_main(["worker", "--loglevel=debug","-n","addJob.%h"])

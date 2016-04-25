@@ -1,120 +1,198 @@
 #!/usr/bin/python2.7
 # -*- coding: utf-8 -*-
 
-from celery import Celery,platforms
-from kombu import Exchange, Queue
-import pymongo
 import mysql.connector
+import random
+from kombu import Exchange, Queue
 import json
 import uuid
 import datetime
 import time
+import pika
+import uuid
+import cf_wechat_pb2
+import threading
+import redis
+from rpc import MyRpc
 
-ONCE_CAPACITY = 5000
-
-amqp_url = "amqp://guest:guest@172.16.0.64/"
-mongo_url = "mongodb://172.16.0.64/srjob"
+mq_ip = "172.16.0.142"
+redis_url = '172.16.0.141'
+redis_passwd = 'smartac123'
+suffix=''
 mysql_conf = {
-    'host': '172.16.0.176',
+    'host': '172.16.0.141',
     'port': 3306,
-    'database': 'smartrewardsdev_30',
-    'user': 'srdev',
-    'password': 'sr_dev1124'
+    'database': 'smartrewards',
+    'user': 'suser',
+    'password': 'spasswd',
+    'charset':'utf8mb4'
 }
 
-mongo = None
-def ensure_mongo():
-    global mongo
-    if mongo:
-        return mongo
-
-    mongo = pymongo.MongoClient(mongo_url);
-    mongo = mongo[mongo_url.split("/")[-1]]
-    return mongo
-
+amqp_url = "amqp://guest:guest@"+mq_ip+"/"
+url = "amqp://guest:guest@"+mq_ip+":5672/"
 
 mydb = None
-def ensure_mysql():
+def connect():
     global mydb
     if mydb:
         return mydb
-
-    mydb = mysql.connector.connect(**mysql_conf);
+    mydb = mysql.connector.connect(**mysql_conf)
     return mydb
 
+def ensure_mysql():
+    try:
+        mydb.ping()
+    except:
+        mydb = connect()
 
-app = Celery("srjob.usertag", broker=amqp_url)
+redisdb = None
+def ensure_redis():
+    global redisdb
+    if redisdb:
+        return redisdb
 
+    redisdb = redis.StrictRedis(host=redis_url,port=6379,password=redis_passwd,db=5)  
+    return redisdb
 
-platforms.C_FORCE_ROOT = True
+rediscustdb = None
+def ensure_cust_redis():
+    global rediscustdb
+    if rediscustdb:
+        return rediscustdb
 
-app.conf.update(
-    CELERY_TRACK_STARTED=True,
-    CELERY_TASK_SERIALIZER='json',
-    CELERY_ACCEPT_CONTENT=['json'],  # Ignore other content
-    CELERY_RESULT_SERIALIZER='json',
-    CELERY_IMPORTS = ("tasks",),
-    CELERYBEAT_SCHEDULE={
-		'find-job-every-1-minutes': {
-            'task': 'srjob.task.find',
-            'schedule': datetime.timedelta(seconds=10),
-        }
-    }
-)
-
-diff_time = time.timezone
-def utc_now():
-    return datetime.datetime.now() + datetime.timedelta(seconds=diff_time)
-
-
-
-@app.task(name="srjob.task.find")
-def findJob():
-    ensure_mongo()
-    ensure_mysql()
-
-    tasks = mongo["job"].find({"isenable": 1})
+    rediscustdb = redis.StrictRedis(host=redis_url,port=6379,password=redis_passwd,db=1)
+    return rediscustdb
 
 
-    for task in tasks:
-        task_id = task['_id']
-        oldtime = task['nexttime']
-        tasktypecode = task['arguments']['tasktypecode']
-        if datetime.datetime.strptime(oldtime, "%Y-%m-%d %H:%M:%S") > (datetime.datetime.now() + datetime.timedelta(seconds=-60)):
-            #å½“tasktypecodeä¸º1æ—¶ï¼Œå¯åŠ¨æ‰“æ ‡ç­¾job
-            if tasktypecode == 1:
-                app.send_task('srjob.usertag.add',args=[json.loads(task['arguments'])],queue='wjx')
-            
-        if task['arguments']['periodcode'] == 1:
-            nexttime = datetime.datetime.now() + datetime.timedelta(minutes=task['arguments']['minute'])
-        if task['arguments']['periodcode'] == 2:
-            nexttime = datetime.datetime.now() + datetime.timedelta(hours=task['arguments']['hour'])
-            nexttime = nexttime + datetime.timedelta(minutes=task['arguments']['minute'])
-        if task['arguments']['periodcode'] == 3:
-            nexttime = datetime.datetime.strftime((datetime.datetime.now() + datetime.timedelta(days=1)), "%Y-%m-%d %H:%M:%S")
-        if task['arguments']['periodcode'] == 4:
-            y = datetime.datetime.strftime(datetime.datetime.now(),'%Y')
-            mon = datetime.datetime.strftime(datetime.datetime.now(),'%m')
-            if (int(mon)+1) in [1,3,5,7,8,10,12]:
-                d = 31
-            elif (int(mon)+1) == 2:
-                if ((int(y) % 100 == 0 and int(y) % 400 == 0) or (int(y) % 100 != 0 and int(y) % 4 == 0)):
-                    d = 29
-                else:
-                    d = 28
-            else:
-                d = 30
-            nexttime = datetime.datetime.strftime((datetime.datetime.now() + datetime.timedelta(days=d)), "%Y-%m-%d %H:%M:%S")
-        if task['arguments']['periodcode'] == 5:
-            nexttime = datetime.datetime.strftime((datetime.datetime.now() + datetime.timedelta(days=7)), "%Y-%m-%d %H:%M:%S")
-        print(nexttime)
-        mongo["job"].update_one({"_id":task_id},
-                                 {"$set":{"nexttime":nexttime}})
-if __name__ == "__main__":
-    # ä½¿ç”¨sys.argvå‚æ•°è¿è¡Œ
-    # app.worker_main()
+exchange = "amq.direct"
+routing_key = "cf.wechat.rpc"
+custrouting_key = "cf.wechat.custrpc"
+#ÀñÈ¯Â·ÓÉ¼ü
+couponrouting_key = "sr.customer.coupon.rpc"
+#»ı·ÖÂ·ÓÉ¼ü
+pointrouting_key = "sr.point"+suffix
+#»á»°Â·ÓÉ¼ü
+sessionrouting_key = "sr.job.session.rpc"
+#»ı·ÖËÍ½±ÉÍÂ·ÓÉ¼ü
+tagrewardrouting_key = "sr.rewards"+suffix
 
-    # ä½¿ç”¨è‡ªå®šä¹‰å‚æ•°è¿è¡Œ
-    # --beatåŒæ—¶å¼€å¯beatæ¨¡å¼ï¼Œå³è¿è¡ŒæŒ‰è®¡åˆ’å‘é€taskçš„å®ä¾‹
-    # åº”ç¡®ä¿å…¨å±€åªæœ‰ä¸€ä»½åŒæ ·çš„beat
-    app.worker_main(["worker", "--beat", "--loglevel=debug","--concurrency=10","-n","worker1.%h"])
+
+rpc = None
+def ensure_rpc():
+    global rpc
+    if rpc:
+        return rpc
+
+    rpc = MyRpc(url, exchange, routing_key)
+    t = threading.Thread(target=rpc.serve)
+    t.setDaemon(True)
+    t.start()
+    return rpc
+
+custrpc = None
+def ensure_custrpc():
+    global custrpc
+    if custrpc:
+        return custrpc
+
+    custrpc = MyRpc(url, exchange, custrouting_key)
+    cust = threading.Thread(target=custrpc.serve)
+    cust.setDaemon(True)
+    cust.start()
+    return custrpc
+
+couponrpc = None
+def ensure_couponrpc():
+    global couponrpc
+    if couponrpc:
+        return couponrpc
+
+    couponrpc = MyRpc(url, exchange, couponrouting_key)
+    coupon = threading.Thread(target=couponrpc.serve)
+    coupon.setDaemon(True)
+    coupon.start()
+    return couponrpc
+
+pointrpc = None
+def ensure_pointrpc():
+    global pointrpc
+    if pointrpc:
+        return pointrpc
+
+    pointrpc = MyRpc(url, exchange, pointrouting_key)
+    point = threading.Thread(target=pointrpc.serve)
+    point.setDaemon(True)
+    point.start()
+    return pointrpc
+
+sessionrpc = None
+def ensure_sessionrpc():
+    global sessionrpc
+    if sessionrpc:
+        return sessionrpc
+
+    sessionrpc = MyRpc(url, exchange, sessionrouting_key)
+    session = threading.Thread(target=sessionrpc.serve)
+    session.setDaemon(True)
+    session.start()
+    return sessionrpc
+
+#·¢Î¢ĞÅÏûÏ¢
+routing_keyali = "cf.wechat.rpc"
+#urlali = "amqp://guest:guest@172.16.0.142:5672/"
+exchangeali = "amq.direct"
+
+
+sendmsgrpc = None
+def ensure_sendmsgrpc():
+    global sendmsgrpc
+    if sendmsgrpc:
+        return sendmsgrpc
+
+    sendmsgrpc = MyRpc(url, exchangeali, routing_keyali)
+    sendmsg = threading.Thread(target=sendmsgrpc.serve)
+    sendmsg.setDaemon(True)
+    sendmsg.start()
+    return sendmsgrpc
+
+#·¢¶ÌĞÅÓÊ¼şÏûÏ¢
+routing_keysmail = "cf.rpc"
+smailrpc = None
+def ensure_sendsmailrpc():
+    global smailrpc
+    if smailrpc:
+        return smailrpc
+
+    smailrpc = MyRpc(url, exchangeali, routing_keysmail)
+    smail = threading.Thread(target=smailrpc.serve)
+    smail.setDaemon(True)
+    smail.start()
+    return smailrpc
+
+#·¢¶ÌĞÅÓÊ¼şÏûÏ¢
+routing_keysmail = "cf.rpc"
+smailrpc = None
+def ensure_sendsmailrpc():
+    global smailrpc
+    if smailrpc:
+        return smailrpc
+
+    smailrpc = MyRpc(url, exchangeali, routing_keysmail)
+    smail = threading.Thread(target=smailrpc.serve)
+    smail.setDaemon(True)
+    smail.start()
+    return smailrpc
+
+#·¢appÏûÏ¢
+routing_keysapp = "cf.app.rpc"
+sapprpc = None
+def ensure_sendsapprpc():
+    global sapprpc
+    if sapprpc:
+        return sapprpc
+
+    sapprpc = MyRpc(url, exchangeali, routing_keysapp)
+    sapp = threading.Thread(target=sapprpc.serve)
+    sapp.setDaemon(True)
+    sapp.start()
+    return sapprpc

@@ -16,14 +16,19 @@ message Message{
 	required Header header=1;
 	// 主体
 	oneof content{
+		// 请求:发消息
+		GroupMessageSendRequest req_group_message_send=13;
+		// 回应:发消息
+		GroupMessageSendResponse res_group_message_send=14;
 		// 请求:获取用户基本信息
-		UserInfoRequest req_userinfo_query=2;
+		UserInfoRequest req_userinfo_query=19;
 		// 回应:获取用户基本信息
-		UserInfoResponse res_userinfo_query=3;	
+		UserInfoResponse res_userinfo_query=20;	
 		// 请求:获取全部会员openid列表
-                SyncUserInfoRequest req_userinfo_sync=4;
+                SyncUserInfoRequest req_userinfo_sync=219;
                 // 回应:获取全部会员openid列表
-                SyncUserInfoResponse res_userinfo_sync=5;
+                SyncUserInfoResponse res_userinfo_sync=220;
+
 	}
 }
 
@@ -46,17 +51,15 @@ message CustomerSearchCondition
 	// Email地址
 	optional string email=17;
 }
-
-
 // 请求:获取用户基本信息
 message UserInfoRequest
 {
 	// 发送账号ID
-	required string account_id=1;
-	// 用户，最终需要openid,单个或批量获取
-	repeated CustomerSearchCondition customer_search_condition=2;
+	required string account_id=10;
+	// 用户，最终需要openid，单个或批量获取
+	repeated CustomerSearchCondition customer_search_condition=11;
 	// 语言，默认CN
-	optional ELanguage language=3;
+	optional ELanguage language=12;
 }
 // 回应:获取用户基本信息
 message UserInfoResponse
@@ -69,44 +72,47 @@ message UserInfoResponse
 	repeated UserInfo result=3;
 	message UserInfo
 	{
-		// 关注状态
-		required bool subscribe=20;
-		// 将用户openid返回，多条数据时用于区分
-		required string openid=21;
-		// 昵称
-		required string nickname=22;
-		// 性别，1是男性2是女性0是未知
-		required int32 sex=23;
-		// 国家
-		required string country=25;
-		// 省份
-		required string province=26;
-		// 城市
-		required string city=24;
-		// 用户头像资源uuid
-		required string avatar_uuid=28;
-		// 关注时间(UTC)
-		required uint64 subscribe_time=29;
-		// 全局ID
-		optional string union_id=30;
-		// 备注
-		required string remark=31;
-		// 所属组ID，暂不支持
-		optional int32 group_id=32;
+		optional int32 wxerrcode=10;
+		optional WxResult wxresult=11;
+		message WxResult
+		{
+			// 关注状态
+			optional bool subscribe=20;
+			// 将用户openid返回，多条数据时用于区分
+			required string openid=21;
+			// 昵称
+			required string nickname=22;
+			// 性别，1是男性2是女性0是未知
+			required int32 sex=23;
+			// 国家
+			required string country=25;
+			// 省份
+			required string province=26;
+			// 城市
+			required string city=24;
+			// 用户头像资源uuid
+			required string avatar_uuid=28;
+			// 关注时间(UTC)
+			required uint64 subscribe_time=29;
+			// 全局ID
+			optional string union_id=30;
+			// 备注
+			required string remark=31;
+			// 所属组ID，暂不支持
+			optional int32 group_id=32;
+		}
 	}
 }
-
 // 请求:获取全部会员openid列表
 message SyncUserInfoRequest
 {
 	// 发送账号ID
-	required string account_id=1;
+	required string account_id=10;
 	// 用户，最终需要openid,单个或批量获取
-	optional CustomerSearchCondition customer_search_condition=2;
+	optional CustomerSearchCondition customer_search_condition=11;
 	// 语言，默认CN
-	optional ELanguage language=3;
+	optional ELanguage language=12;
 }
-
 // 回应:获取全部会员openid列表
 message SyncUserInfoResponse
 {
@@ -114,8 +120,69 @@ message SyncUserInfoResponse
 	required int32 errcode=1;
 	// 错误消息
 	optional string errmsg=2;
-	// 发送结果
+	// 发送结果，openid的数组
 	repeated string openid_list=3;
+	// 下一个openid
+	optional string next_openid=4;
+}
+
+// 请求:发消息
+message GroupMessageSendRequest
+{
+	// 发送账号ID
+	required string account_id=10;
+	// 发送目标
+	repeated CustomerSearchCondition customer_search_condition=13;
+	// 发送分组ID
+	optional string group_id=20;
+	// 发送内容
+	repeated MessageContent message_content=14;
+	// 是否记录，默认为true
+	optional bool is_record=15;
+}
+// 回应:发消息
+message GroupMessageSendResponse
+{
+	// 错误码
+	required int32 errcode=1;
+	// 错误消息
+	optional string errmsg=2;
+	// 微信消息id
+	optional int32 msg_id=3;
+}
+
+// 消息内容
+message MessageContent
+{
+	// 消息类型
+	required EMediaType type=10;
+	// 资源ID
+	optional string resource_id=20;
+	// 文本内容
+	optional string content=30;
+}
+
+// 媒体类型
+enum EMediaType
+{
+	// 图文（内容）
+	NEWS=1;
+	// 文本
+	TEXT=2;
+	// 语音
+	VOICE=3;
+	// 音乐
+	MUSIC=4;
+	// 图片
+	IMAGE=5;
+	// 视频
+	VIDEO=6;
+	// 缩略图
+	THUMB=7;
+	// 卡券
+	WXCARD=8;
+	// 图文（id）
+	MPNEWS=9;
 }
 
 // 语言

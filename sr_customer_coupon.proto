@@ -1,0 +1,64 @@
+/*
+	SR 礼券相关API协议
+	RPC:		sr.customer.coupon.rpc
+	Exchange:	sr.customer.coupon.notify
+*/
+package sr.customer.coupon;
+//-------------------------全部消息
+message Header{
+	required string sender=1;
+	required string sender_type=2;
+	optional uint32 invoke_id=3;
+}
+
+message Message{
+	// 头部
+	required Header header=1;
+	// 主体
+	oneof content
+	{
+
+		RewardsCouponRequest req_reward_coupon=20;
+		RewardsCouponResponse res_reward_coupon=21;
+		
+	}
+}
+
+
+// 请求:发送礼券(SC->SR)
+message RewardsCouponRequest
+{
+    //礼券id
+    required int32 couponid=1;
+    //会员id
+    required int32 custid=2;
+    //活动name
+    required string activityname=3;
+    //交易id
+    optional int32 tradeid=4;
+    //数量
+    required int32 quantity=5;
+    //发送渠道:1 注册,2 积分,3 交易,4 打标签,5 活动,6 兑换,7 大屏,8 海报,9 后台系统
+    required int32 sendchannelcode=6;
+    //详细渠道
+    optional int32 detailchannelcode=7;
+    //礼券的适用范围
+    required int32 applicablechannelcode=8;
+    //微信卡券号
+    optional string wechatcardid=9;
+    //说明
+    optional string remark=10;
+     //用来兑换礼券的积分数
+    optional int32 point=11;
+}
+
+// 回应:发送礼券 (SR->SC)
+message RewardsCouponResponse
+{
+	// 错误码
+	required int32 errcode=1;
+	// 错误消息
+	optional string errmsg=2;
+}
+
+

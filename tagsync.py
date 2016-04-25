@@ -3,46 +3,17 @@
 
 from celery import Celery,platforms
 from kombu import Exchange, Queue
-import pymongo
+from config import *
 import mysql.connector
 import json
 import uuid
 import datetime
 import time
-
-ONCE_CAPACITY = 100
-
-amqp_url = "amqp://guest:guest@172.16.0.64/"
-mongo_url = "mongodb://172.16.0.64/srjob"
-mysql_conf = {
-    'host': '172.16.0.176',
-    'port': 3306,
-    'database': 'smartrewardsdev_30',
-    'user': 'srdev',
-    'password': 'sr_dev1124'
-}
-
-mongo = None
-def ensure_mongo():
-    global mongo
-    if mongo:
-        return mongo
-
-    mongo = pymongo.MongoClient(mongo_url);
-    mongo = mongo[mongo_url.split("/")[-1]]
-    return mongo
+import sr_reward_pb2
 
 
-mydb = None
-def ensure_mysql():
-    global mydb
-    if mydb:
-        return mydb
 
-    mydb = mysql.connector.connect(**mysql_conf);
-    return mydb
-
-
+ONCE_CAPACITY = 5000
 app = Celery("srjob.usertag", broker=amqp_url)
 
 
@@ -53,11 +24,11 @@ app.conf.update(
     CELERY_TASK_SERIALIZER='json',
     CELERY_ACCEPT_CONTENT=['json'],  # Ignore other content
     CELERY_RESULT_SERIALIZER='json',
-    CELERY_IMPORTS = ("findJob","tasks","usercheck","addJob",),
+    CELERY_IMPORTS = ("addsendapp","preparesendapp","dosendapp","addJob","addreward","addsendmail","addsendmsg","addsendsms","addtask","custinfosync","custsync","doreward","dosendmail","dosendmsg","dosendsms","findJob","preparereward","preparesendmail","preparesendmsg","preparesendsms","sessionclose","tasks","usercheck",),
     CELERYBEAT_SCHEDULE={
         'add-every-10-seconds': {
             'task': 'srjob.usertag.dbsync',
-            'schedule': datetime.timedelta(seconds=10),
+            'schedule': datetime.timedelta(seconds=60),
         }
     }
 )
@@ -69,53 +40,81 @@ def utc_now():
 
 @app.task(name="srjob.usertag.dbsync")
 def dbsync():
-    ensure_mongo()
+    redisdb = ensure_redis()
+    mydb = connect()
     ensure_mysql()
 
     cursor = mydb.cursor()
+    listlen = redisdb.llen("task")
+    for i in range(0, listlen):
+        listid = redisdb.lindex("task",i)
+        logtask = redisdb.hgetall(listid)
+        print(logtask['status'])
+        if logtask['status'] == 'STARTED' and logtask['isenable'] == '1' and logtask['prepare'] == '1':
+            redisdb.hset(listid,'isenable',0)
+            task_id = logtask['_id']
+            synclistlen = redisdb.llen("dbsync")
+            print("synclistlen="+str(synclistlen))
+            for i in range(synclistlen-1,-1,-1):
+                print(i)
+                synclistid = redisdb.lindex("dbsync",i)
+                tagsync = redisdb.hgetall(synclistid)
+                if tagsync['_id']==task_id:
+                    tag_id = tagsync["tagid"]
+                    sql = tagsync["sql"]
+                    custids = tagsync["custids"]
+                    upcount = int(tagsync["count"])
+                    tagcount = int(tagsync["tagcount"])
+                    if "logid" in tagsync.keys():
+                        logid = tagsync["logid"]
+                    else:
+                        logid = 0
+                    try:
+                        if sql != "INSERT INTO sr_tag_cust VALUES":
+                            cursor.execute(sql)
+                        updatesql = ("UPDATE sr_tag_tag SET taghotcount = taghotcount + %d where id = %d" % (tagcount,int(tag_id)))
+                        cursor.execute(updatesql)
+                        mydb.commit()
+                        redisdb.delete(synclistid)
+                        redisdb.lrem("dbsync",1,synclistid)
+                        redisdb.hincrby("task:"+str(task_id),'downcount',-upcount)
+                        print("tagreward=====================")
+                        if custids != "None":
+                            sendrwd(custids)
+                        newsendsms = redisdb.hgetall(listid)
+                        if newsendsms and newsendsms["downcount"] == '0':
+                            redisdb.hmset("task:"+str(task_id),{"status":"SUCCESS", "end_time":utc_now()})
+                            if logid:
+                                updatelogsql = ("update sr_sys_schedule_log set statecode = 2 where id = %d" % int(logid))
+                                cursor.execute(updatelogsql)
+                                mydb.commit()
 
-    task_ids = mongo["task"].find({"status": "STARTED"}, {"_id": 1})
-    task_ids = map(lambda x: x["_id"], task_ids)
+                    except Exception as e:
+                        print("error==="+str(e))
+                        redisdb.hmset("task:"+str(task_id),{"status":"FAILURE", "end_time":utc_now(), "error": str(e)})
+                        if logid:
+                            updatelogsql = ("update sr_sys_schedule_log set statecode = 3 where id = %d" % int(logid))
+                            cursor.execute(updatelogsql)
+                            mydb.commit()
 
-    for task_id in task_ids:
-        try:
-            upcount = 0
-            tags = mongo["dbsync"].find_one({"task._id": task_id})
-            tag_id = tags["tagid"]
-            while True:
-                doc = mongo["dbsync"].find_one_and_delete({"task._id": task_id}, {"_id": 0, "sql": 1})
-                if not doc:
-                    break
+def sendrwd(custids):
+    conn = pika.BlockingConnection(pika.ConnectionParameters(mq_ip))
+    channel = conn.channel()
+    exchange = "sr.rewards.notify"
+    channel.exchange_declare(exchange,durable='true')
+    req = sr_reward_pb2.Message()
+    req.header.sender="req_tag"
+    req.header.sender_type="type1"
+    req.req_tag.custid = custids
+    req.req_tag.tagtime = datetime.datetime.strftime(datetime.datetime.now(), "%Y-%m-%d %H:%M:%S")
+    print(req)
+    buff = req.SerializeToString()
+    channel.basic_publish(exchange=exchange,
+         routing_key=tagrewardrouting_key,
+         body=buff)
 
-                upcount += 1
+    conn.close()
 
-                sql = doc["sql"]
-
-                cursor.execute(sql)
-
-                if upcount % ONCE_CAPACITY == 0:
-                    updatesql = ("UPDATE sr_tag_tag SET taghotcount = taghotcount + %d where id = \"%s\"" % (upcount,tag_id))
-                    cursor.execute(updatesql)
-                    mydb.commit()
-
-            if upcount % ONCE_CAPACITY:
-                updatesql = ("UPDATE sr_tag_tag SET taghotcount = taghotcount + %d where id = \"%s\"" % (upcount,tag_id))
-                cursor.execute(updatesql)
-                mydb.commit()
-
-            if not upcount:
-                break
-
-            doc = mongo["task"].find_one_and_update({"_id": task_id, "status": "STARTED", "downcount": {"$exists": True}},
-                                                    {"$inc": {"downcount": (0 - upcount)}},
-                                                    {"_id": 0, "downcount": 1},
-                                                    return_document=pymongo.ReturnDocument.AFTER)
-            if doc and doc["downcount"] == 0:
-                mongo["task"].update_one({"_id": task_id, "status": "STARTED"},
-                                         {"$set": {"status": "SUCCESS", "end_time": utc_now()}})
-        except Exception as e:
-            mongo["task"].find_one_and_update({"_id": task_id},
-                                              {'$set': {"status": "FAILURE", "error": str(e), "end_time": utc_now()}})
 
 
 
@@ -126,4 +125,4 @@ if __name__ == "__main__":
     # 使用自定义参数运行
     # --beat同时开启beat模式，即运行按计划发送task的实例
     # 应确保全局只有一份同样的beat
-    app.worker_main(["worker", "--beat", "--loglevel=debug","--concurrency=10","-n","tagsync.%h"])
+    app.worker_main(["worker", "--beat", "--loglevel=debug","-n","tagsync.%h","-s","./sche-tagsync"])

@@ -1,0 +1,119 @@
+/*
+	Copyright © 2015 Smartac Inc. All rights reserved.
+	Leakage of inside information, is strictly prohibited
+*/
+/*
+	CF 通用对接协议
+	RPC名称:cf.app.rpc
+	Exchange:cf.app.notify
+*/
+
+package cf.app;
+
+message Header{
+	required string sender=1;
+	required string sender_type=2;
+	optional uint32 invoke_id=3;
+}
+
+//-------------------------全部消息
+message Message{
+	// 头部
+	required Header header=1;
+	// 主体
+	oneof content{
+		// 请求:推送高级接口
+		PushMessageRequest req_push_message=10;
+		// 回应:推送高级接口
+		PushMessageResponse res_push_message=11;
+	}
+}
+
+//-------------------------内容定义
+// 设备类型
+enum EDeviceType
+{
+	iOS=1;
+	Andriod=2;
+	Winphone=3;
+	All=9;
+}
+// 发送内容
+message MessageContent
+{
+	// 消息or通知or全要
+	required EMessageType type=1;
+	// 内容
+	required string content=2;
+	// 主题
+	optional string title=3;
+	// 扩展字段，自定义 JSON 格式的 Key/Value 信息，以供业务使用
+	repeated KeyValue extras=4;
+
+	// 消息类型
+	enum EMessageType
+	{
+		// 通知
+		Notification=1;
+		// 消息
+		Information=2;
+		// 全部
+		All=9;
+	}
+}
+
+// 客户检索条件
+message CustomerSearchCondition
+{
+	// 客户ID
+	optional string id=10;
+	// 微信相关
+	optional string cf_account_id=11;
+	optional string wechat_open_id=12;
+	optional string wechat_union_id=13;
+	// 客户编号
+	optional string code=18;
+	// Ali账号
+	optional string ali_id=14;
+	// 手机号码
+	optional string mobile=15;
+	// 设备MAC地址
+	optional string device_mac=16;
+	// Email地址
+	optional string email=17;
+	// APP
+	optional string app_device_id=21;
+	// 卡ID
+	optional string card_id=22;
+}
+
+// 键值对
+message KeyValue
+{
+	required string key=10;
+	optional string value=20;
+}
+
+//-------------------------消息定义
+// 请求:推送消息
+message PushMessageRequest
+{
+	// 发送账户ID
+	required string account_id=10;
+	// 设备类型
+	repeated EDeviceType device_type=20;
+	// 发送目标,空数组表示所有注册用户
+	repeated CustomerSearchCondition customer_search_condition=40;
+	// 发送内容
+	required MessageContent message_content=70;
+}
+// 回应:推送消息
+message PushMessageResponse
+{
+	// 错误码
+	required int32 errcode=1;
+	// 错误消息
+	optional string errmsg=2;
+	// 推送ID
+	optional string message_id=10;
+}
